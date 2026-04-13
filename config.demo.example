@@ -1,0 +1,26 @@
+{
+  "code_root": "__CODE_ROOT__",
+  "gateway": {
+    "port": 17001,
+    "headers": {
+      "x-demo-user": "tilt-demo"
+    }
+  },
+  "go_services": {
+    "go-hello": {
+      "path": "./go-hello",
+      "port": 18081,
+      "route": "/api/hello",
+      "enabled": true
+    }
+  },
+  "frontend_services": {
+    "web-hello": {
+      "path": "./web-hello",
+      "port": 18080,
+      "static_path": "./dist",
+      "route": "/demo",
+      "enabled": true
+    }
+  }
+}

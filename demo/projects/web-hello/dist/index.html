@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Tilt Demo Frontend</title>
+    <style>
+      :root {
+        --bg: #f4f7fb;
+        --panel: #ffffff;
+        --text: #1c2430;
+        --accent: #0f766e;
+      }
+      body {
+        margin: 0;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: linear-gradient(120deg, #e7f0ff, #f5fffa);
+        color: var(--text);
+      }
+      .wrap {
+        max-width: 720px;
+        margin: 8vh auto;
+        background: var(--panel);
+        border-radius: 16px;
+        padding: 24px;
+        box-shadow: 0 20px 40px rgba(0, 0, 0, 0.08);
+      }
+      h1 {
+        margin-top: 0;
+      }
+      button {
+        background: var(--accent);
+        color: #fff;
+        border: none;
+        border-radius: 8px;
+        padding: 10px 14px;
+        cursor: pointer;
+      }
+      pre {
+        background: #0f172a;
+        color: #e2e8f0;
+        border-radius: 10px;
+        padding: 12px;
+        overflow: auto;
+      }
+      .muted {
+        color: #475569;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="wrap">
+      <h1>Tilt Demo Frontend</h1>
+      <p class="muted">This static page calls <code>/api/hello/ping</code> via the built-in gateway proxy.</p>
+      <button id="btn">Call Backend API</button>
+      <pre id="out">Click the button to load response...</pre>
+    </main>
+
+    <script>
+      const btn = document.getElementById("btn");
+      const out = document.getElementById("out");
+
+      btn.addEventListener("click", async () => {
+        out.textContent = "Loading...";
+        try {
+          const res = await fetch("/api/hello/ping");
+          const json = await res.json();
+          out.textContent = JSON.stringify(json, null, 2);
+        } catch (err) {
+          out.textContent = "Request failed: " + err.message;
+        }
+      });
+    </script>
+  </body>
+</html>

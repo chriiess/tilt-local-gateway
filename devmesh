@@ -1,0 +1,776 @@
+#!/bin/bash
+# 微服务开发环境管理脚本
+
+# 强制使用 bash 执行，避免被 sh/zsh 以不兼容语法解析
+if [ -z "${BASH_VERSION:-}" ]; then
+    exec /bin/bash "$0" "$@"
+fi
+
+set -e
+
+# 获取脚本所在目录
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONFIG_FILE="$SCRIPT_DIR/config.json"
+CONFIG_DEMO_EXAMPLE_FILE="$SCRIPT_DIR/config.demo.example"
+CONFIG_FULL_EXAMPLE_FILE="$SCRIPT_DIR/config.full.example"
+
+# 颜色输出
+RED=$'\033[0;31m'
+GREEN=$'\033[0;32m'
+YELLOW=$'\033[1;33m'
+BLUE=$'\033[0;34m'
+NC=$'\033[0m' # No Color
+
+# 运行时变量
+CODE_ROOT=""
+CLEANUP_DONE=false
+CLEANUP_QUIET=false
+
+load_code_root() {
+    if [ ! -f "$CONFIG_FILE" ]; then
+        echo -e "${RED}错误: 未找到 config.json 文件 ($CONFIG_FILE)${NC}"
+        echo -e "请先运行: ${YELLOW}$0 init${NC}"
+        exit 1
+    fi
+
+    CODE_ROOT=$(jq -r '.code_root // empty' "$CONFIG_FILE" 2>/dev/null)
+    if [ -z "$CODE_ROOT" ]; then
+        echo -e "${RED}错误: config.json 中未配置 code_root${NC}"
+        exit 1
+    fi
+}
+
+ensure_code_root_tiltfile() {
+    local code_root_tiltfile="$CODE_ROOT/Tiltfile"
+    if [ -f "$code_root_tiltfile" ] && ! grep -q "自动生成的 Tiltfile" "$code_root_tiltfile"; then
+        echo -e "${YELLOW}检测到 CODE_ROOT 已存在自定义 Tiltfile，跳过覆盖: $code_root_tiltfile${NC}"
+        return
+    fi
+
+    echo -e "${BLUE}同步 CODE_ROOT Tiltfile...${NC}"
+    cat > "$code_root_tiltfile" << __TILT__
+# 自动生成的 Tiltfile
+# 此文件会引用当前项目的 Tiltfile
+# 生成时间: $(date '+%Y-%m-%d %H:%M:%S')
+
+# 引用当前项目的 Tiltfile
+include("$SCRIPT_DIR/Tiltfile")
+__TILT__
+    echo -e "${GREEN}✓ 已更新 Tiltfile: $code_root_tiltfile${NC}"
+}
+
+prepare_runtime() {
+    load_code_root
+    ensure_code_root_tiltfile
+    cd "$CODE_ROOT"
+}
+
+run_tilt() {
+    TILT_CONFIG_FILE="$CONFIG_FILE" tilt "$@"
+}
+
+# 从 config.json 读取所有端口
+get_all_ports() {
+    if [ ! -f "$CONFIG_FILE" ]; then
+        echo ""
+        return
+    fi
+
+    local ports=()
+
+    # 网关端口
+    local gateway_port
+    gateway_port=$(jq -r '.gateway.port // empty' "$CONFIG_FILE" 2>/dev/null)
+    if [ -n "$gateway_port" ]; then
+        ports+=("$gateway_port")
+    fi
+
+    # Go 服务端口
+    local go_ports
+    go_ports=$(jq -r '.go_services // {} | to_entries[] | select(.value.enabled == true) | .value.port' "$CONFIG_FILE" 2>/dev/null)
+    if [ -n "$go_ports" ]; then
+        while IFS= read -r port; do
+            [ -n "$port" ] && ports+=("$port")
+        done <<< "$go_ports"
+    fi
+
+    # 前端服务端口
+    local frontend_ports
+    frontend_ports=$(jq -r '.frontend_services // {} | to_entries[] | select(.value.enabled == true) | .value.port' "$CONFIG_FILE" 2>/dev/null)
+    if [ -n "$frontend_ports" ]; then
+        while IFS= read -r port; do
+            [ -n "$port" ] && ports+=("$port")
+        done <<< "$frontend_ports"
+    fi
+
+    # 去重并输出
+    printf '%s\n' "${ports[@]}" | sort -u
+}
+
+print_usage() {
+    cat << __USAGE__
+${GREEN}微服务开发环境管理${NC}
+
+${YELLOW}用法:${NC}
+    $0 [-c <config_file>] <command> [options]
+
+${YELLOW}全局选项:${NC}
+    ${GREEN}-c, --config${NC}      指定配置文件路径（默认: $SCRIPT_DIR/config.json）
+
+${YELLOW}命令:${NC}
+    ${GREEN}init [--full]${NC}      生成配置文件（默认 Demo，可选完整版模板）
+    ${GREEN}validate${NC}           校验配置和环境依赖
+    ${GREEN}up [services]${NC}      启动所有服务或指定服务
+    ${GREEN}down${NC}               停止所有服务并清理端口
+    ${GREEN}restart [services]${NC} 重启所有服务或指定服务
+    ${GREEN}status${NC}             查看服务状态
+    ${GREEN}logs <service>${NC}     查看指定服务日志
+    ${GREEN}cleanup${NC}            安全清理（仅清理本工具启动的进程）
+    ${GREEN}ui${NC}                 打开 Tilt Web UI
+    ${GREEN}watch${NC}              监控模式 (tilt up)
+    ${GREEN}ports${NC}              检查端口占用情况
+    ${GREEN}setup-hosts${NC}        配置本地域名解析（可选）
+    ${GREEN}setup-nginx${NC}        配置 Nginx 80 端口权限（可选）
+
+${YELLOW}示例:${NC}
+    $0 init                  # 生成可直接运行的 Demo 配置
+    $0 init --full           # 生成完整版配置模板（需按项目实际路径调整）
+    $0 -c=./config.json up  # 使用指定配置文件启动
+    $0 up -c=./config.json  # 子命令后指定配置文件也生效
+    $0 validate              # 校验配置和依赖
+    $0 up                    # 启动所有服务
+    $0 up user-service       # 只启动 user-service 服务
+    $0 down                  # 停止所有服务并清理端口
+    $0 logs user-service     # 查看 user-service 服务日志
+    $0 ports                 # 检查配置文件中的端口占用情况
+    $0 setup-hosts           # 配置本地域名解析（可选）
+    $0 setup-nginx           # 配置 Nginx 80 端口权限（可选）
+
+${YELLOW}端口分配:${NC}
+    API 网关:     使用配置文件中的 gateway.port
+    Go 服务:      使用配置文件中的服务端口
+    前端服务:     使用配置文件中的服务端口
+
+__USAGE__
+}
+
+cmd_init() {
+    local init_mode="${1:-demo}"
+    local template_file="$CONFIG_DEMO_EXAMPLE_FILE"
+    local code_root_value=""
+
+    case "$init_mode" in
+        demo|"")
+            template_file="$CONFIG_DEMO_EXAMPLE_FILE"
+            code_root_value="$SCRIPT_DIR/demo/projects"
+            ;;
+        --full|full)
+            template_file="$CONFIG_FULL_EXAMPLE_FILE"
+            code_root_value="$SCRIPT_DIR"
+            ;;
+        *)
+            echo -e "${RED}错误: init 不支持参数 '$init_mode'${NC}"
+            echo "用法: ./devmesh init [--full]"
+            exit 1
+            ;;
+    esac
+
+    if [ -f "$CONFIG_FILE" ]; then
+        echo -e "${YELLOW}config.json 已存在: $CONFIG_FILE${NC}"
+        echo "如需重置，请先手动备份并删除后重试。"
+        return
+    fi
+
+    if [ ! -f "$template_file" ]; then
+        echo -e "${RED}错误: 未找到示例配置文件 ($template_file)${NC}"
+        exit 1
+    fi
+
+    sed "s|__CODE_ROOT__|$code_root_value|g" "$template_file" > "$CONFIG_FILE"
+
+    echo -e "${GREEN}✓ 已生成 config.json${NC}"
+    if [ "$init_mode" = "--full" ] || [ "$init_mode" = "full" ]; then
+        echo "已写入完整版配置模板："
+        echo "  - 来源: config.full.example"
+        echo "  - code_root: $code_root_value"
+        echo "请先按你的项目结构修改 path/route/domain 等字段，再运行："
+        echo "  1) ./devmesh validate"
+        echo "  2) ./devmesh up"
+    else
+        echo "已写入 Demo 配置："
+        echo "  - Go 服务: go-hello (18081)"
+        echo "  - 前端服务: web-hello (18080)"
+        echo "下一步："
+        echo "  1) 运行 ./devmesh validate"
+        echo "  2) 运行 ./devmesh up"
+        echo "  3) 打开 http://localhost:18080"
+    fi
+}
+
+# 检查 Tilt 是否安装
+check_tilt() {
+    if ! command -v tilt &> /dev/null; then
+        echo -e "${RED}错误: Tilt 未安装${NC}"
+        echo "请运行: brew install tilt"
+        exit 1
+    fi
+}
+
+check_domain_line() {
+    local svc="$1"
+    local raw_domains="$2"
+    local has_error=0
+
+    IFS=',' read -r -a domains <<< "$raw_domains"
+    for domain in "${domains[@]}"; do
+        domain="$(echo "$domain" | xargs)"
+        [ -z "$domain" ] && continue
+
+        local host="$domain"
+        host="${host#http://}"
+        host="${host#https://}"
+        host="${host%%/*}"
+        host="${host%%:*}"
+
+        if [ -z "$host" ]; then
+            echo -e "${RED}✗${NC} 服务 ${YELLOW}$svc${NC} 的 domain 无法解析主机名: $domain"
+            has_error=1
+            continue
+        fi
+
+        if ! [[ "$host" =~ ^[A-Za-z0-9.-]+$ ]]; then
+            echo -e "${RED}✗${NC} 服务 ${YELLOW}$svc${NC} 的 domain 主机名非法: $domain"
+            has_error=1
+        fi
+    done
+
+    return $has_error
+}
+
+check_route_line() {
+    local svc="$1"
+    local raw_routes="$2"
+    local has_error=0
+
+    IFS=',' read -r -a routes <<< "$raw_routes"
+    for route in "${routes[@]}"; do
+        route="$(echo "$route" | xargs)"
+        [ -z "$route" ] && continue
+        if [[ "$route" != /* ]]; then
+            echo -e "${RED}✗${NC} 服务 ${YELLOW}$svc${NC} 的 route 必须以 / 开头: $route"
+            has_error=1
+        fi
+    done
+
+    return $has_error
+}
+
+get_enabled_domains() {
+    jq -r '
+      [
+        (.go_services // {} | to_entries[] | select(.value.enabled == true and .value.domain != null) | .value.domain),
+        (.frontend_services // {} | to_entries[] | select(.value.enabled == true and .value.domain != null) | .value.domain)
+      ]
+      | .[]
+    ' "$CONFIG_FILE" \
+        | tr ',' '\n' \
+        | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
+        | sed 's#^http://##' \
+        | sed 's#^https://##' \
+        | sed 's#/.*$##' \
+        | sed 's/:.*$//' \
+        | sed '/^$/d' \
+        | sort -u
+}
+
+confirm_and_prepare_domain_prerequisites() {
+    local domains
+    domains=$(get_enabled_domains)
+    [ -z "$domains" ] && return 0
+
+    local current_user nginx_sudoers_file needs_nginx_setup needs_hosts_setup
+    current_user=$(whoami)
+    nginx_sudoers_file="/etc/sudoers.d/tilt-nginx-${current_user}"
+    needs_nginx_setup=0
+    needs_hosts_setup=0
+
+    if [ ! -f "$nginx_sudoers_file" ]; then
+        needs_nginx_setup=1
+    fi
+
+    while IFS= read -r domain; do
+        [ -z "$domain" ] && continue
+        if ! grep -Eq "(^|[[:space:]])${domain}([[:space:]]|$)" /etc/hosts; then
+            needs_hosts_setup=1
+            break
+        fi
+    done <<< "$domains"
+
+    if [ "$needs_nginx_setup" -eq 0 ] && [ "$needs_hosts_setup" -eq 0 ]; then
+        return 0
+    fi
+
+    echo ""
+    echo -e "${YELLOW}检测到已配置 domain，需要准备系统权限/hosts：${NC}"
+    if [ "$needs_nginx_setup" -eq 1 ]; then
+        echo "  - 需要配置 nginx sudo 权限（setup-nginx）"
+    fi
+    if [ "$needs_hosts_setup" -eq 1 ]; then
+        echo "  - 需要更新 /etc/hosts（setup-hosts）"
+    fi
+    echo ""
+    read -r -p "是否现在自动执行所需准备步骤？[Y/n] " answer
+    case "$answer" in
+        ""|Y|y|YES|yes)
+            if [ "$needs_nginx_setup" -eq 1 ]; then
+                "$SCRIPT_DIR/scripts/setup-nginx.sh"
+            fi
+            if [ "$needs_hosts_setup" -eq 1 ]; then
+                "$SCRIPT_DIR/scripts/setup-hosts.sh"
+            fi
+            ;;
+        *)
+            echo -e "${RED}已取消。请先完成 domain 环境准备后再启动。${NC}"
+            return 1
+            ;;
+    esac
+
+    return 0
+}
+
+validate_config() {
+    local has_error=0
+
+    echo -e "${BLUE}校验配置与环境...${NC}"
+
+    # 依赖校验
+    for cmd in jq tilt nginx lsof; do
+        if ! command -v "$cmd" >/dev/null 2>&1; then
+            echo -e "${RED}✗${NC} 缺少依赖命令: $cmd"
+            has_error=1
+        fi
+    done
+
+    if [ ! -f "$CONFIG_FILE" ]; then
+        echo -e "${RED}✗${NC} 未找到配置文件: $CONFIG_FILE"
+        echo "请先运行 ./devmesh init"
+        exit 1
+    fi
+
+    if ! jq . "$CONFIG_FILE" >/dev/null 2>&1; then
+        echo -e "${RED}✗${NC} config.json 不是合法 JSON"
+        exit 1
+    fi
+
+    local code_root
+    code_root=$(jq -r '.code_root // empty' "$CONFIG_FILE")
+    if [ -z "$code_root" ]; then
+        echo -e "${RED}✗${NC} code_root 未配置"
+        has_error=1
+    elif [ ! -d "$code_root" ]; then
+        echo -e "${RED}✗${NC} code_root 不存在: $code_root"
+        has_error=1
+    else
+        echo -e "${GREEN}✓${NC} code_root 存在: $code_root"
+    fi
+
+    # 至少启用一个服务
+    local enabled_go enabled_frontend total_enabled
+    enabled_go=$(jq '[.go_services // {} | to_entries[] | select(.value.enabled == true)] | length' "$CONFIG_FILE")
+    enabled_frontend=$(jq '[.frontend_services // {} | to_entries[] | select(.value.enabled == true)] | length' "$CONFIG_FILE")
+    total_enabled=$((enabled_go + enabled_frontend))
+    if [ "$total_enabled" -eq 0 ]; then
+        echo -e "${RED}✗${NC} 没有任何 enabled=true 的服务"
+        has_error=1
+    else
+        echo -e "${GREEN}✓${NC} 已启用服务数量: Go=$enabled_go, Frontend=$enabled_frontend"
+    fi
+
+    # 路径存在性校验（仅检查 enabled 服务）
+    while IFS='|' read -r svc_type svc_name svc_path; do
+        [ -z "$svc_name" ] && continue
+
+        local full_path=""
+        if [[ "$svc_path" == ./* ]]; then
+            full_path="$code_root/${svc_path#./}"
+        elif [[ "$svc_path" == /* ]]; then
+            full_path="$svc_path"
+        else
+            full_path="$code_root"
+        fi
+
+        if [ ! -d "$full_path" ]; then
+            echo -e "${RED}✗${NC} ${svc_type} 服务 ${YELLOW}$svc_name${NC} 路径不存在: $full_path"
+            has_error=1
+        fi
+    done < <(jq -r '
+      [
+        (.go_services // {} | to_entries[] | select(.value.enabled == true) | ["Go", .key, (.value.path // "")]),
+        (.frontend_services // {} | to_entries[] | select(.value.enabled == true) | ["Frontend", .key, (.value.path // "")])
+      ]
+      | .[]
+      | @tsv
+    ' "$CONFIG_FILE" | awk -F'\t' '{print $1"|"$2"|"$3}')
+
+    # 端口冲突校验
+    local duplicates
+    duplicates=$(jq -r '
+      [
+        (.gateway.port // empty),
+        (.go_services // {} | to_entries[] | select(.value.enabled == true) | .value.port),
+        (.frontend_services // {} | to_entries[] | select(.value.enabled == true) | .value.port)
+      ]
+      | flatten
+      | map(select(. != null and . != ""))
+      | map(tostring)
+      | .[]
+    ' "$CONFIG_FILE" | sort | uniq -d)
+
+    if [ -n "$duplicates" ]; then
+      echo -e "${RED}✗${NC} 检测到端口重复:"
+      while IFS= read -r p; do
+          [ -n "$p" ] && echo "   - $p"
+      done <<< "$duplicates"
+      has_error=1
+    else
+      echo -e "${GREEN}✓${NC} 端口未发现重复"
+    fi
+
+    # domain / route 校验
+    while IFS='|' read -r svc_name domains; do
+        [ -z "$svc_name" ] && continue
+        check_domain_line "$svc_name" "$domains" || has_error=1
+    done < <(jq -r '
+      [
+        (.go_services // {} | to_entries[] | select(.value.enabled == true and .value.domain != null) | [.key, .value.domain]),
+        (.frontend_services // {} | to_entries[] | select(.value.enabled == true and .value.domain != null) | [.key, .value.domain])
+      ]
+      | .[]
+      | @tsv
+    ' "$CONFIG_FILE" | awk -F'\t' '{print $1"|"$2}')
+
+    while IFS='|' read -r svc_name routes; do
+        [ -z "$svc_name" ] && continue
+        check_route_line "$svc_name" "$routes" || has_error=1
+    done < <(jq -r '
+      [
+        (.go_services // {} | to_entries[] | select(.value.enabled == true and .value.route != null) | [.key, .value.route]),
+        (.frontend_services // {} | to_entries[] | select(.value.enabled == true and .value.route != null) | [.key, .value.route])
+      ]
+      | .[]
+      | @tsv
+    ' "$CONFIG_FILE" | awk -F'\t' '{print $1"|"$2}')
+
+    if [ "$has_error" -eq 0 ]; then
+        echo -e "${GREEN}✅ 校验通过${NC}"
+        return 0
+    fi
+
+    echo -e "${RED}❌ 校验失败，请修复后重试${NC}"
+    return 1
+}
+
+cmd_validate() {
+    validate_config
+}
+
+# 启动服务
+cmd_up() {
+    validate_config
+    confirm_and_prepare_domain_prerequisites
+    prepare_runtime
+    check_tilt
+
+    echo -e "${BLUE}启动服务...${NC}"
+    echo -e "${YELLOW}提示: 使用 Ctrl+C 停止时会自动清理所有端口${NC}"
+
+    # 设置退出时清理
+    trap 'CLEANUP_QUIET=true; cleanup' EXIT INT TERM
+
+    if [ -z "$1" ]; then
+        run_tilt up
+    else
+        run_tilt up "$@"
+    fi
+}
+
+# 清理所有服务和端口
+cleanup() {
+    # 防止重复清理
+    if [ "$CLEANUP_DONE" = true ]; then
+        return
+    fi
+    CLEANUP_DONE=true
+
+    if [ "$CLEANUP_QUIET" != true ]; then
+        echo -e "${YELLOW}清理所有服务和端口...${NC}"
+    fi
+
+    if [ -z "$CODE_ROOT" ] && [ -f "$CONFIG_FILE" ]; then
+        CODE_ROOT=$(jq -r '.code_root // empty' "$CONFIG_FILE" 2>/dev/null || true)
+    fi
+
+    # 1. 停止当前 code_root 对应的 Tilt 会话
+    if [ "$CLEANUP_QUIET" != true ]; then
+        echo "  停止当前项目 Tilt 会话..."
+    fi
+    run_tilt down >/dev/null 2>&1 || true
+
+    # 2. 停止由本工具启动的 Nginx 网关
+    local nginx_conf_path="$CODE_ROOT/tilt/nginx.conf"
+    if [ -n "$CODE_ROOT" ] && pgrep -f "nginx.*$nginx_conf_path" > /dev/null; then
+        if [ "$CLEANUP_QUIET" != true ]; then
+            echo "  停止 Nginx 网关..."
+        fi
+        pkill -f "nginx.*$nginx_conf_path" 2>/dev/null || true
+    fi
+
+    # 3. 不再按端口杀进程，避免误杀用户其他服务
+    if [ "$CLEANUP_QUIET" != true ]; then
+        echo "  跳过端口级 kill（安全模式）"
+    fi
+
+    if [ "$CLEANUP_QUIET" != true ]; then
+        echo -e "${GREEN}✅ 清理完成${NC}"
+    fi
+}
+
+# 停止服务
+cmd_down() {
+    prepare_runtime
+    check_tilt
+
+    echo -e "${YELLOW}停止所有服务...${NC}"
+    run_tilt down
+    # 执行完整清理
+    cleanup
+}
+
+# 重启服务
+cmd_restart() {
+    check_tilt
+    echo -e "${YELLOW}重启服务...${NC}"
+    cmd_down
+    sleep 2
+    cmd_up "$@"
+}
+
+# 查看状态
+cmd_status() {
+    prepare_runtime
+    check_tilt
+    run_tilt get uiresources
+}
+
+# 查看日志
+cmd_logs() {
+    prepare_runtime
+    check_tilt
+
+    if [ -z "$1" ]; then
+        echo -e "${RED}错误: 请指定服务名称${NC}"
+        print_usage
+        exit 1
+    fi
+
+    run_tilt logs "$1" -f
+}
+
+# 打开 UI
+cmd_ui() {
+    validate_config
+    confirm_and_prepare_domain_prerequisites
+    prepare_runtime
+    check_tilt
+
+    echo -e "${BLUE}打开 Tilt Web UI...${NC}"
+    echo "访问: http://localhost:10350"
+    run_tilt up
+}
+
+# 检查端口占用
+cmd_ports() {
+    if [ ! -f "$CONFIG_FILE" ]; then
+        echo -e "${RED}错误: 未找到 config.json 文件 ($CONFIG_FILE)${NC}"
+        exit 1
+    fi
+
+    if ! command -v jq &> /dev/null; then
+        echo -e "${RED}错误: 需要安装 jq 工具${NC}"
+        echo "请运行: brew install jq"
+        exit 1
+    fi
+
+    echo -e "${BLUE}检查配置文件中的端口占用情况...${NC}"
+    echo ""
+
+    local ports
+    ports=$(get_all_ports)
+    if [ -z "$ports" ]; then
+        echo -e "${YELLOW}未找到配置的端口${NC}"
+        return
+    fi
+
+    local occupied_count=0
+    local total_count=0
+
+    while IFS= read -r port; do
+        if [ -n "$port" ]; then
+            total_count=$((total_count + 1))
+            if lsof -ti:$port > /dev/null 2>&1; then
+                # 获取所有监听该端口的进程（LISTEN状态）
+                local pids
+                pids=$(lsof -ti:$port 2>/dev/null)
+                local listener_found=false
+
+                # 遍历所有PID，只显示监听端口的进程
+                while IFS= read -r pid; do
+                    if [ -n "$pid" ]; then
+                        # 检查是否为监听状态的进程（使用 -i 参数检查端口）
+                        if lsof -p "$pid" -a -i:"$port" 2>/dev/null | grep -q "LISTEN"; then
+                            local process_info
+                            process_info=$(ps -p "$pid" -o comm= 2>/dev/null || echo "unknown")
+                            echo -e "${RED}✗ 端口 $port${NC} 被 ${YELLOW}$process_info${NC} (PID: $pid) 占用"
+                            listener_found=true
+                            occupied_count=$((occupied_count + 1))
+                        fi
+                    fi
+                done <<< "$pids"
+
+                # 如果没有找到监听进程但有进程占用端口（可能是客户端连接）
+                if [ "$listener_found" = false ]; then
+                    echo -e "${RED}✗ 端口 $port${NC} 被占用（只有客户端连接）"
+                    occupied_count=$((occupied_count + 1))
+                fi
+            else
+                echo -e "${GREEN}✓ 端口 $port${NC} 空闲"
+            fi
+        fi
+    done <<< "$ports"
+
+    echo ""
+    echo -e "总计: ${BLUE}$total_count${NC} 个端口, ${RED}$occupied_count${NC} 个被占用"
+}
+
+
+cmd_setup_hosts() {
+    "$SCRIPT_DIR/scripts/setup-hosts.sh"
+}
+
+cmd_setup_nginx() {
+    "$SCRIPT_DIR/scripts/setup-nginx.sh"
+}
+
+resolve_config_file_path() {
+    local raw_path="$1"
+    if [[ "$raw_path" == "~"* ]]; then
+        raw_path="${HOME}${raw_path:1}"
+    fi
+
+    if [[ "$raw_path" == /* ]]; then
+        echo "$raw_path"
+    else
+        echo "$PWD/$raw_path"
+    fi
+}
+
+# 解析全局参数（支持放在子命令前后）
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -c=*|--config=*)
+            CONFIG_FILE=$(resolve_config_file_path "${1#*=}")
+            shift
+            ;;
+        -c|--config)
+            shift
+            if [ -z "${1:-}" ]; then
+                echo -e "${RED}错误: -c/--config 需要提供文件路径${NC}"
+                print_usage
+                exit 1
+            fi
+            CONFIG_FILE=$(resolve_config_file_path "$1")
+            shift
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
+
+COMMAND="${1:-}"
+if [ $# -gt 0 ]; then
+    shift
+fi
+COMMAND_ARGS=()
+
+# 继续解析子命令后的 -c/--config，同时保留其余参数
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -c=*|--config=*)
+            CONFIG_FILE=$(resolve_config_file_path "${1#*=}")
+            shift
+            ;;
+        -c|--config)
+            shift
+            if [ -z "${1:-}" ]; then
+                echo -e "${RED}错误: -c/--config 需要提供文件路径${NC}"
+                print_usage
+                exit 1
+            fi
+            CONFIG_FILE=$(resolve_config_file_path "$1")
+            shift
+            ;;
+        *)
+            COMMAND_ARGS+=("$1")
+            shift
+            ;;
+    esac
+done
+
+# 主命令
+case "$COMMAND" in
+    init)
+        cmd_init "${COMMAND_ARGS[@]}"
+        ;;
+    validate)
+        cmd_validate
+        ;;
+    up)
+        cmd_up "${COMMAND_ARGS[@]}"
+        ;;
+    down)
+        cmd_down
+        ;;
+    restart)
+        cmd_restart "${COMMAND_ARGS[@]}"
+        ;;
+    status)
+        cmd_status
+        ;;
+    logs)
+        cmd_logs "${COMMAND_ARGS[@]}"
+        ;;
+    cleanup)
+        cleanup
+        ;;
+    ui|watch)
+        cmd_ui
+        ;;
+    ports)
+        cmd_ports
+        ;;
+    setup-hosts)
+        cmd_setup_hosts
+        ;;
+    setup-nginx)
+        cmd_setup_nginx
+        ;;
+    help|--help|-h|"")
+        print_usage
+        ;;
+    *)
+        echo -e "${RED}错误: 未知命令 '$COMMAND'${NC}"
+        print_usage
+        exit 1
+        ;;
+esac

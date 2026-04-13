@@ -1,0 +1,474 @@
+# Tilt 配置文件 - 优雅管理多个微服务
+
+# 读取配置文件（支持通过环境变量覆盖，默认 ../config.json）
+# local() 返回 blob，需先转字符串再作为 read_file 路径使用。
+config_path = str(local('bash -lc \'printf "%s" "${TILT_CONFIG_FILE:-../config.json}"\''))
+config_file = read_file(config_path)
+config = decode_json(config_file)
+
+CODE_ROOT = config.get("code_root", "./")
+GATEWAY_PORT = config.get("gateway", {}).get("port", 7001)
+GATEWAY_HEADERS = config.get("gateway", {}).get("headers", {})
+GO_SERVICES = config.get("go_services", {})
+FRONTEND_SERVICES = config.get("frontend_services", {})
+HAS_DOMAIN_SERVERS = False
+
+for svc in GO_SERVICES.values():
+    if svc.get("enabled", True) and svc.get("domain") and svc.get("port"):
+        HAS_DOMAIN_SERVERS = True
+        break
+
+if not HAS_DOMAIN_SERVERS:
+    for svc in FRONTEND_SERVICES.values():
+        if svc.get("enabled", True) and svc.get("static_path") and svc.get("domain") and svc.get("port"):
+            HAS_DOMAIN_SERVERS = True
+            break
+
+def normalize_domain_list(raw_domains):
+    """
+    将 domain 字段标准化为 nginx 可用的 server_name 列表。
+    支持输入:
+    - user-service
+    - http://user-service
+    - https://user-service
+    - http://user-service/path
+    """
+    domains = []
+    for item in raw_domains.split(","):
+        d = item.strip()
+        if not d:
+            continue
+        if d.startswith("http://"):
+            d = d[7:]
+        elif d.startswith("https://"):
+            d = d[8:]
+        if "/" in d:
+            d = d.split("/", 1)[0]
+        if ":" in d:
+            d = d.split(":", 1)[0]
+        if d:
+            domains.append(d)
+    return domains
+
+# ============================================
+# 通用 Go 服务定义函数
+# ============================================
+def go_service(name, config):
+    """
+    定义 Go 微服务
+    """
+    if not config.get("enabled", True):
+        return
+
+    path = config.get("path")
+    # 相对路径转换为绝对路径
+    if path and path.startswith("./"):
+        full_path = os.path.join(CODE_ROOT, path[2:])
+    elif path and path.startswith("/"):
+        full_path = path
+    else:
+        full_path = CODE_ROOT
+
+    # 构建并运行
+    run_cmd = "go mod tidy && go build -o main"
+
+    # 启动服务
+    config_file = config.get("config")
+    if config_file:
+        config_arg = config.get("config_arg", "-c")
+
+        # 对于某些参数格式（如 -config=），需要使用相对路径
+        use_relative_path = (config_arg == "-config=" or config_arg == "--gf.gcfg.file=")
+
+        if use_relative_path:
+            config_file_for_cmd = config_file
+        else:
+            if config_file.startswith("./"):
+                config_file_for_cmd = os.path.join(full_path, config_file[2:])
+            elif config_file.startswith("/"):
+                config_file_for_cmd = config_file
+            else:
+                config_file_for_cmd = os.path.join(full_path, config_file)
+
+        if config_arg != None:
+            if config_arg.endswith("="):
+                run_cmd += " && exec ./main " + config_arg + config_file_for_cmd
+            else:
+                run_cmd += " && exec ./main " + config_arg + " " + config_file_for_cmd
+        else:
+            run_cmd += " && exec ./main"
+    else:
+        run_cmd += " && exec ./main"
+
+    local_resource(
+        name=name,
+        serve_cmd=run_cmd,
+        serve_dir=full_path,
+    )
+
+# ============================================
+# 前端服务定义函数
+# ============================================
+def frontend_service(name, config):
+    """
+    定义前端 Vue/React 服务
+    """
+    if not config.get("enabled", True):
+        return
+
+    path = config.get("path")
+    port = config.get("port", 8080)
+    static_path = config.get("static_path", None)
+    node_version = config.get("node_version", None)
+    start_command = config.get("start_command", "npm run serve")
+
+    if path and path.startswith("./"):
+        full_path = os.path.join(CODE_ROOT, path[2:])
+    elif path and path.startswith("/"):
+        full_path = path
+    else:
+        full_path = CODE_ROOT
+
+    if static_path:
+        if static_path.startswith("./"):
+            full_static_path = os.path.join(CODE_ROOT, static_path[2:])
+        elif static_path.startswith("/"):
+            full_static_path = static_path
+        else:
+            full_static_path = os.path.join(full_path, static_path)
+
+        config["__static_path__"] = full_static_path
+
+        local_resource(
+            name=name,
+            serve_cmd="echo 'Static files served by Nginx at port " + str(port) + "' && echo 'Press Ctrl+C to stop' && sleep 86400",
+            serve_dir=full_path,
+        )
+        return
+
+    if node_version:
+        serve_cmd = """
+        export NVM_DIR="$HOME/.nvm" && \
+        [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" && \
+        nvm use """ + node_version + """ && \
+        (npm install || true) && \
+        PORT=""" + str(port) + """ exec """ + start_command + """
+        """
+    else:
+        serve_cmd = """
+        (npm install || true) && \
+        PORT=""" + str(port) + """ exec """ + start_command + """
+        """
+
+    local_resource(
+        name=name,
+        serve_cmd=serve_cmd,
+        serve_dir=full_path,
+    )
+
+# ============================================
+# API 网关配置生成
+# ============================================
+def generate_gateway_config():
+    """
+    生成 Nginx 网关配置文件
+    """
+    nginx_conf_dir = os.path.join(CODE_ROOT, "tilt")
+    nginx_conf_path = os.path.join(nginx_conf_dir, "nginx.conf")
+
+    config = """worker_processes 1;
+
+daemon off;  # 在前台运行，让 Tilt 能检测到服务状态
+
+events {
+    worker_connections 1024;
+}
+
+http {
+    # 日志配置（输出到 stdout/stderr，可在 Tilt Web UI 查看）
+    access_log /dev/stdout;
+    error_log /dev/stderr info;
+
+    # MIME 类型配置
+    types {
+        text/html html htm shtml;
+        text/css css;
+        image/gif gif;
+        image/jpeg jpg jpeg;
+        image/png png;
+        image/svg+xml svg svgz;
+        application/javascript js;
+        application/json json;
+        application/xml xml;
+        application/pdf pdf;
+        font/ttf ttf;
+        font/otf otf;
+        font/woff woff;
+        font/woff2 woff2;
+        image/x-icon ico;
+        audio/mpeg mp3;
+        video/mp4 mp4;
+    }
+
+    default_type application/octet-stream;
+
+"""
+
+    # 为每个有域名的服务生成独立的 server 块（只监听 80 端口）
+    for name, svc in GO_SERVICES.items():
+        if svc.get("enabled", True) and svc.get("domain") and svc.get("port"):
+            domain = svc["domain"]
+            port = svc["port"]
+
+            normalized_domains = normalize_domain_list(domain)
+            if len(normalized_domains) == 0:
+                continue
+            nginx_server_name = " ".join(normalized_domains)
+
+            config += "    # " + name.upper() + " 服务（域名：" + ",".join(normalized_domains) + " → 端口 " + str(port) + "）\n"
+            config += "    server {\n"
+            config += "        listen 80;\n"
+            config += "        server_name " + nginx_server_name + ";\n"
+            config += "\n"
+            config += "        location / {\n"
+            config += "            proxy_pass http://127.0.0.1:" + str(port) + "/;\n"
+            config += "            proxy_set_header Host $host;\n"
+            config += "            proxy_set_header X-Real-IP $remote_addr;\n"
+            config += "            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n"
+            config += "            proxy_set_header X-Forwarded-Proto $scheme;\n"
+
+            for header_name, header_value in GATEWAY_HEADERS.items():
+                config += "            proxy_set_header " + header_name + " \"" + str(header_value) + "\";\n"
+
+            config += "\n"
+            config += "            # CORS 支持\n"
+            config += "            add_header Access-Control-Allow-Origin *;\n"
+            config += "            add_header Access-Control-Allow-Methods 'GET, POST, PUT, DELETE, OPTIONS';\n"
+            config += "            add_header Access-Control-Allow-Headers 'DNT,X-CustomHeader,Keep-Alive,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Authorization';\n"
+            config += "\n"
+            config += "            if ($request_method = 'OPTIONS') {\n"
+            config += "                return 204;\n"
+            config += "            }\n"
+            config += "        }\n"
+            config += "    }\n"
+            config += "\n"
+
+    # 为所有静态文件模式的 FRONTEND 服务生成独立的 server 块
+    for name, svc in FRONTEND_SERVICES.items():
+        if svc.get("enabled", True) and svc.get("static_path") and svc.get("port"):
+            port = svc["port"]
+            static_path = svc.get("static_path")
+            domain = svc.get("domain", "")
+            svc_path = svc.get("path", "")
+
+            if static_path.startswith("./"):
+                if svc_path and svc_path.startswith("./"):
+                    full_svc_path = os.path.join(CODE_ROOT, svc_path[2:])
+                elif svc_path and svc_path.startswith("/"):
+                    full_svc_path = svc_path
+                else:
+                    full_svc_path = CODE_ROOT
+                full_static_path = os.path.join(full_svc_path, static_path[2:])
+            elif static_path.startswith("/"):
+                full_static_path = static_path
+            else:
+                if svc_path and svc_path.startswith("./"):
+                    full_svc_path = os.path.join(CODE_ROOT, svc_path[2:])
+                elif svc_path and svc_path.startswith("/"):
+                    full_svc_path = svc_path
+                else:
+                    full_svc_path = CODE_ROOT
+                full_static_path = os.path.join(full_svc_path, static_path)
+
+            if domain:
+                normalized_domains = normalize_domain_list(domain)
+                if len(normalized_domains) == 0:
+                    continue
+                nginx_server_name = " ".join(normalized_domains)
+                config += "    # " + name.upper() + " 前端静态文件服务（域名：" + ",".join(normalized_domains) + " → 端口 " + str(port) + "）\n"
+                config += "    server {\n"
+                config += "        listen 80;\n"
+                config += "        server_name " + nginx_server_name + ";\n"
+            else:
+                config += "    # " + name.upper() + " 前端静态文件服务（端口：" + str(port) + "）\n"
+                config += "    server {\n"
+                config += "        listen " + str(port) + ";\n"
+                config += "        server_name localhost;\n"
+
+            config += "\n"
+            config += "        # 静态文件模式\n"
+            config += "        root " + full_static_path + ";\n"
+            config += "\n"
+            config += "        # 静态文件路由\n"
+            config += "        location / {\n"
+            config += "            try_files $uri $uri/ /index.html;\n"
+            config += "            add_header Cache-Control 'no-cache, no-store, must-revalidate';\n"
+            config += "        }\n"
+
+            route = svc.get("route", "")
+            if route:
+                route = route.strip("/")
+                config += "\n"
+                config += "        # SPA 路由支持: " + route + "\n"
+                config += "        location /" + route + "/ {\n"
+                config += "            alias " + full_static_path + "/;\n"
+                config += "            try_files $uri $uri/ /" + route + "/index.html;\n"
+                config += "            add_header Cache-Control 'no-cache, no-store, must-revalidate';\n"
+                config += "        }\n"
+
+            config += "\n"
+            config += "        # API 代理到网关\n"
+            config += "        location /api/ {\n"
+            config += "            proxy_pass http://127.0.0.1:" + str(GATEWAY_PORT) + ";\n"
+            config += "            proxy_set_header Host $host;\n"
+            config += "            proxy_set_header X-Real-IP $remote_addr;\n"
+            config += "            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n"
+            config += "            proxy_set_header X-Forwarded-Proto $scheme;\n"
+
+            for header_name, header_value in GATEWAY_HEADERS.items():
+                config += "            proxy_set_header " + header_name + " \"" + str(header_value) + "\";\n"
+
+            config += "\n"
+            config += "            # CORS 支持\n"
+            config += "            add_header Access-Control-Allow-Origin *;\n"
+            config += "            add_header Access-Control-Allow-Methods 'GET, POST, PUT, DELETE, OPTIONS';\n"
+            config += "            add_header Access-Control-Allow-Headers 'DNT,X-CustomHeader,Keep-Alive,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Authorization';\n"
+            config += "\n"
+            config += "            if ($request_method = 'OPTIONS') {\n"
+            config += "                return 204;\n"
+            config += "            }\n"
+            config += "        }\n"
+
+            config += "\n"
+            config += "        # Auth 代理到网关\n"
+            config += "        location /auth/ {\n"
+            config += "            proxy_pass http://127.0.0.1:" + str(GATEWAY_PORT) + ";\n"
+            config += "            proxy_set_header Host $host;\n"
+            config += "            proxy_set_header X-Real-IP $remote_addr;\n"
+            config += "            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n"
+            config += "            proxy_set_header X-Forwarded-Proto $scheme;\n"
+
+            for header_name, header_value in GATEWAY_HEADERS.items():
+                config += "            proxy_set_header " + header_name + " \"" + str(header_value) + "\";\n"
+
+            config += "\n"
+            config += "            # CORS 支持\n"
+            config += "            add_header Access-Control-Allow-Origin *;\n"
+            config += "            add_header Access-Control-Allow-Methods 'GET, POST, PUT, DELETE, OPTIONS';\n"
+            config += "            add_header Access-Control-Allow-Headers 'DNT,X-CustomHeader,Keep-Alive,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Authorization';\n"
+            config += "\n"
+            config += "            if ($request_method = 'OPTIONS') {\n"
+            config += "                return 204;\n"
+            config += "            }\n"
+            config += "        }\n"
+
+            config += "    }\n"
+            config += "\n"
+
+    config += "    # 主网关（基于路径路由，端口 " + str(GATEWAY_PORT) + "）\n"
+    config += "    server {\n"
+    config += "        listen " + str(GATEWAY_PORT) + " default_server;\n"
+    config += "        server_name localhost;\n"
+    config += "\n"
+    config += "        # 默认返回 404\n"
+    config += "        location / {\n"
+    config += "            return 404 '{\"error\": \"API gateway - route not found\"}';\n"
+    config += "            add_header Content-Type application/json;\n"
+    config += "        }\n"
+    config += "\n"
+
+    for name, svc in GO_SERVICES.items():
+        if svc.get("enabled", True) and svc.get("route") and svc.get("port"):
+            routes = svc["route"]
+            port = svc["port"]
+            route_list = routes.split(",") if "," in routes else [routes]
+            for route in route_list:
+                route = route.strip()
+                config += "        # " + name.upper() + " 服务路由\n"
+                config += "        location " + route + "/ {\n"
+                config += "            proxy_pass http://127.0.0.1:" + str(port) + ";\n"
+                config += "            proxy_set_header Host $host;\n"
+                config += "            proxy_set_header X-Real-IP $remote_addr;\n"
+                config += "            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n"
+                config += "            proxy_set_header X-Forwarded-Proto $scheme;\n"
+
+                for header_name, header_value in GATEWAY_HEADERS.items():
+                    config += "            proxy_set_header " + header_name + " \"" + str(header_value) + "\";\n"
+
+                config += "\n"
+                config += "            # CORS 支持\n"
+                config += "            add_header Access-Control-Allow-Origin *;\n"
+                config += "            add_header Access-Control-Allow-Methods 'GET, POST, PUT, DELETE, OPTIONS';\n"
+                config += "            add_header Access-Control-Allow-Headers 'DNT,X-CustomHeader,Keep-Alive,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Authorization';\n"
+                config += "\n"
+                config += "            if ($request_method = 'OPTIONS') {\n"
+                config += "                return 204;\n"
+                config += "            }\n"
+                config += "        }\n"
+                config += "\n"
+
+    for name, svc in FRONTEND_SERVICES.items():
+        if svc.get("enabled", True) and svc.get("route") and svc.get("port"):
+            routes = svc["route"]
+            port = svc["port"]
+            route_list = routes.split(",") if "," in routes else [routes]
+            for route in route_list:
+                route = route.strip()
+                config += "        # " + name.upper() + " 前端服务路由\n"
+                config += "        location " + route + "/ {\n"
+                config += "            proxy_pass http://127.0.0.1:" + str(port) + ";\n"
+                config += "            proxy_set_header Host $host;\n"
+                config += "            proxy_set_header X-Real-IP $remote_addr;\n"
+                config += "            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n"
+                config += "            proxy_set_header X-Forwarded-Proto $scheme;\n"
+
+                for header_name, header_value in GATEWAY_HEADERS.items():
+                    config += "            proxy_set_header " + header_name + " \"" + str(header_value) + "\";\n"
+
+                config += "\n"
+                config += "            # CORS 支持\n"
+                config += "            add_header Access-Control-Allow-Origin *;\n"
+                config += "            add_header Access-Control-Allow-Methods 'GET, POST, PUT, DELETE, OPTIONS';\n"
+                config += "            add_header Access-Control-Allow-Headers 'DNT,X-CustomHeader,Keep-Alive,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Authorization';\n"
+                config += "\n"
+                config += "            if ($request_method = 'OPTIONS') {\n"
+                config += "                return 204;\n"
+                config += "            }\n"
+                config += "        }\n"
+                config += "\n"
+
+    config += """    }
+}
+"""
+
+    local("mkdir -p " + nginx_conf_dir)
+    local("cat > " + nginx_conf_path + " << 'EOF'\n" + config + "EOF\n")
+    return nginx_conf_path
+
+# ============================================
+# API 网关服务
+# ============================================
+def start_gateway():
+    """
+    启动 Nginx API 网关
+    """
+    config_path = generate_gateway_config()
+
+    serve_cmd = "sudo nginx -c " + config_path if HAS_DOMAIN_SERVERS else "nginx -c " + config_path
+    local_resource(
+        name="gateway",
+        serve_cmd=serve_cmd,
+        serve_dir=CODE_ROOT,
+        deps=[config_path],
+    )
+
+# 启动 API 网关
+start_gateway()
+
+# 创建所有 Go 服务
+for name, cfg in GO_SERVICES.items():
+    go_service(name, cfg)
+
+# 创建所有前端服务
+for name, cfg in FRONTEND_SERVICES.items():
+    frontend_service(name, cfg)

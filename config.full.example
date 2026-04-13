@@ -1,0 +1,56 @@
+{
+  "code_root": "__CODE_ROOT__",
+  "gateway": {
+    "port": 17001,
+    "headers": {
+      "x-env": "local",
+      "x-debug": "true"
+    }
+  },
+  "go_services": {
+    "user-api": {
+      "path": "./services/user-api",
+      "port": 18081,
+      "route": "/api/user,/api/profile",
+      "domain": "user.local.dev,https://user.local.test",
+      "config": "./configs/dev.yaml",
+      "config_arg": "-config=",
+      "enabled": true
+    },
+    "order-api": {
+      "path": "./services/order-api",
+      "port": 18082,
+      "route": "/api/order",
+      "config": "./conf/local.toml",
+      "config_arg": "--gf.gcfg.file=",
+      "enabled": true
+    },
+    "legacy-api": {
+      "path": "./services/legacy-api",
+      "port": 18083,
+      "route": "/api/legacy",
+      "config": "./config/dev.yaml",
+      "config_arg": null,
+      "enabled": false
+    }
+  },
+  "frontend_services": {
+    "admin-web": {
+      "path": "./frontends/admin-web",
+      "port": 18080,
+      "start_command": "pnpm dev",
+      "node_version": "20",
+      "route": "/admin,/dashboard",
+      "domain": "admin.local.dev,http://admin.local.test",
+      "enabled": true
+    },
+    "portal-static": {
+      "path": "./frontends/portal",
+      "port": 18084,
+      "static_path": "./dist",
+      "route": "/portal",
+      "domain": "portal.local.dev",
+      "enabled": true
+    }
+  }
+}
