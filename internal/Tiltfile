@@ -212,6 +212,9 @@ http {
 
     default_type application/octet-stream;
 
+    # 请求体大小限制（支持大文件上传）
+    client_max_body_size 100m;
+
 """
 
     # 为每个有域名的服务生成独立的 server 块（只监听 80 端口）
