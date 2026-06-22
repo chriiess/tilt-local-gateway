@@ -6,20 +6,70 @@ config_path = str(local('bash -lc \'printf "%s" "${TILT_CONFIG_FILE:-../config.j
 config_file = read_file(config_path)
 config = decode_json(config_file)
 
+def shell_quote(s):
+    """
+    生成安全的单引号 shell 参数。
+    """
+    return "'" + s.replace("'", "'\\''") + "'"
+
+def service_items(service_map, ordered_names):
+    """
+    decode_json 读取 JSON object 后不保证保留配置文件中的 key 顺序。
+    这里按 Python 从原始 JSON 中读取到的 key 顺序输出，并兼容未出现在顺序表中的服务。
+    """
+    items = []
+    seen = {}
+
+    for name in ordered_names:
+        if name in service_map:
+            items.append((name, service_map[name]))
+            seen[name] = True
+
+    for name, cfg in service_map.items():
+        if name not in seen:
+            items.append((name, cfg))
+
+    return items
+
+service_order_json = str(local(
+    "python3 -c " + shell_quote("""
+import json
+import sys
+from collections import OrderedDict
+
+with open(sys.argv[1], "r", encoding="utf-8") as f:
+    cfg = json.load(f, object_pairs_hook=OrderedDict)
+
+def keys(section):
+    value = cfg.get(section, {})
+    if isinstance(value, dict):
+        return list(value.keys())
+    return []
+
+print(json.dumps({
+    "go_services": keys("go_services"),
+    "frontend_services": keys("frontend_services"),
+}))
+""") + " " + shell_quote(config_path)
+))
+SERVICE_ORDER = decode_json(service_order_json)
+
 CODE_ROOT = config.get("code_root", "./")
 GATEWAY_PORT = config.get("gateway", {}).get("port", 7001)
 GATEWAY_HEADERS = config.get("gateway", {}).get("headers", {})
 GO_SERVICES = config.get("go_services", {})
 FRONTEND_SERVICES = config.get("frontend_services", {})
+GO_SERVICE_NAMES = SERVICE_ORDER.get("go_services", [])
+FRONTEND_SERVICE_NAMES = SERVICE_ORDER.get("frontend_services", [])
 HAS_DOMAIN_SERVERS = False
 
-for svc in GO_SERVICES.values():
+for name, svc in service_items(GO_SERVICES, GO_SERVICE_NAMES):
     if svc.get("enabled", True) and svc.get("domain") and svc.get("port"):
         HAS_DOMAIN_SERVERS = True
         break
 
 if not HAS_DOMAIN_SERVERS:
-    for svc in FRONTEND_SERVICES.values():
+    for name, svc in service_items(FRONTEND_SERVICES, FRONTEND_SERVICE_NAMES):
         if svc.get("enabled", True) and svc.get("static_path") and svc.get("domain") and svc.get("port"):
             HAS_DOMAIN_SERVERS = True
             break
@@ -218,7 +268,7 @@ http {
 """
 
     # 为每个有域名的服务生成独立的 server 块（只监听 80 端口）
-    for name, svc in GO_SERVICES.items():
+    for name, svc in service_items(GO_SERVICES, GO_SERVICE_NAMES):
         if svc.get("enabled", True) and svc.get("domain") and svc.get("port"):
             domain = svc["domain"]
             port = svc["port"]
@@ -257,7 +307,7 @@ http {
             config += "\n"
 
     # 为所有静态文件模式的 FRONTEND 服务生成独立的 server 块
-    for name, svc in FRONTEND_SERVICES.items():
+    for name, svc in service_items(FRONTEND_SERVICES, FRONTEND_SERVICE_NAMES):
         if svc.get("enabled", True) and svc.get("static_path") and svc.get("port"):
             port = svc["port"]
             static_path = svc.get("static_path")
@@ -380,7 +430,7 @@ http {
     config += "        }\n"
     config += "\n"
 
-    for name, svc in GO_SERVICES.items():
+    for name, svc in service_items(GO_SERVICES, GO_SERVICE_NAMES):
         if svc.get("enabled", True) and svc.get("route") and svc.get("port"):
             routes = svc["route"]
             port = svc["port"]
@@ -410,7 +460,7 @@ http {
                 config += "        }\n"
                 config += "\n"
 
-    for name, svc in FRONTEND_SERVICES.items():
+    for name, svc in service_items(FRONTEND_SERVICES, FRONTEND_SERVICE_NAMES):
         if svc.get("enabled", True) and svc.get("route") and svc.get("port"):
             routes = svc["route"]
             port = svc["port"]
@@ -469,9 +519,9 @@ def start_gateway():
 start_gateway()
 
 # 创建所有 Go 服务
-for name, cfg in GO_SERVICES.items():
+for name, cfg in service_items(GO_SERVICES, GO_SERVICE_NAMES):
     go_service(name, cfg)
 
 # 创建所有前端服务
-for name, cfg in FRONTEND_SERVICES.items():
+for name, cfg in service_items(FRONTEND_SERVICES, FRONTEND_SERVICE_NAMES):
     frontend_service(name, cfg)
