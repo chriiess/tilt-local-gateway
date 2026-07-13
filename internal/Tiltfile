@@ -70,7 +70,7 @@ for name, svc in service_items(GO_SERVICES, GO_SERVICE_NAMES):
 
 if not HAS_DOMAIN_SERVERS:
     for name, svc in service_items(FRONTEND_SERVICES, FRONTEND_SERVICE_NAMES):
-        if svc.get("enabled", True) and svc.get("static_path") and svc.get("domain") and svc.get("port"):
+        if svc.get("enabled", True) and svc.get("static_path") and not svc.get("dev_mode", False) and svc.get("domain") and svc.get("port"):
             HAS_DOMAIN_SERVERS = True
             break
 
@@ -99,6 +99,74 @@ def normalize_domain_list(raw_domains):
         if d:
             domains.append(d)
     return domains
+
+def normalize_route_list(raw_routes):
+    """
+    将逗号分隔的 route/proxy_route 字段标准化为 nginx location 前缀列表。
+    """
+    if not raw_routes:
+        return []
+
+    routes = []
+    for item in raw_routes.split(","):
+        route = item.strip()
+        if not route:
+            continue
+        if not route.startswith("/"):
+            route = "/" + route
+        if route != "/" and route.endswith("/"):
+            route = route[:-1]
+        routes.append(route)
+    return routes
+
+def append_gateway_proxy_location(config, route, port, headers, comment):
+    """
+    为指定路径生成代理 location，兼容 /foo 与 /foo/bar 两种访问方式。
+    """
+    config += "        # " + comment + "\n"
+    config += "        location = " + route + " {\n"
+    config += "            proxy_pass http://127.0.0.1:" + str(port) + route + ";\n"
+    config += "            proxy_set_header Host $host;\n"
+    config += "            proxy_set_header X-Real-IP $remote_addr;\n"
+    config += "            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n"
+    config += "            proxy_set_header X-Forwarded-Proto $scheme;\n"
+
+    for header_name, header_value in headers.items():
+        config += "            proxy_set_header " + header_name + " \"" + str(header_value) + "\";\n"
+
+    config += "\n"
+    config += "            # CORS 支持\n"
+    config += "            add_header Access-Control-Allow-Origin *;\n"
+    config += "            add_header Access-Control-Allow-Methods 'GET, POST, PUT, DELETE, OPTIONS';\n"
+    config += "            add_header Access-Control-Allow-Headers 'DNT,X-CustomHeader,Keep-Alive,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Authorization';\n"
+    config += "\n"
+    config += "            if ($request_method = 'OPTIONS') {\n"
+    config += "                return 204;\n"
+    config += "            }\n"
+    config += "        }\n"
+    config += "\n"
+    config += "        location ^~ " + route + "/ {\n"
+    config += "            proxy_pass http://127.0.0.1:" + str(port) + ";\n"
+    config += "            proxy_set_header Host $host;\n"
+    config += "            proxy_set_header X-Real-IP $remote_addr;\n"
+    config += "            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n"
+    config += "            proxy_set_header X-Forwarded-Proto $scheme;\n"
+
+    for header_name, header_value in headers.items():
+        config += "            proxy_set_header " + header_name + " \"" + str(header_value) + "\";\n"
+
+    config += "\n"
+    config += "            # CORS 支持\n"
+    config += "            add_header Access-Control-Allow-Origin *;\n"
+    config += "            add_header Access-Control-Allow-Methods 'GET, POST, PUT, DELETE, OPTIONS';\n"
+    config += "            add_header Access-Control-Allow-Headers 'DNT,X-CustomHeader,Keep-Alive,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Authorization';\n"
+    config += "\n"
+    config += "            if ($request_method = 'OPTIONS') {\n"
+    config += "                return 204;\n"
+    config += "            }\n"
+    config += "        }\n"
+    config += "\n"
+    return config
 
 # ============================================
 # 通用 Go 服务定义函数
@@ -171,6 +239,7 @@ def frontend_service(name, config):
     static_path = config.get("static_path", None)
     node_version = config.get("node_version", None)
     start_command = config.get("start_command", "npm run serve")
+    dev_mode = config.get("dev_mode", False)
 
     if path and path.startswith("./"):
         full_path = os.path.join(CODE_ROOT, path[2:])
@@ -179,7 +248,7 @@ def frontend_service(name, config):
     else:
         full_path = CODE_ROOT
 
-    if static_path:
+    if static_path and not dev_mode:
         if static_path.startswith("./"):
             full_static_path = os.path.join(CODE_ROOT, static_path[2:])
         elif static_path.startswith("/"):
@@ -308,7 +377,7 @@ http {
 
     # 为所有静态文件模式的 FRONTEND 服务生成独立的 server 块
     for name, svc in service_items(FRONTEND_SERVICES, FRONTEND_SERVICE_NAMES):
-        if svc.get("enabled", True) and svc.get("static_path") and svc.get("port"):
+        if svc.get("enabled", True) and svc.get("static_path") and not svc.get("dev_mode", False) and svc.get("port"):
             port = svc["port"]
             static_path = svc.get("static_path")
             domain = svc.get("domain", "")
@@ -369,51 +438,20 @@ http {
                 config += "            add_header Cache-Control 'no-cache, no-store, must-revalidate';\n"
                 config += "        }\n"
 
-            config += "\n"
-            config += "        # API 代理到网关\n"
-            config += "        location /api/ {\n"
-            config += "            proxy_pass http://127.0.0.1:" + str(GATEWAY_PORT) + ";\n"
-            config += "            proxy_set_header Host $host;\n"
-            config += "            proxy_set_header X-Real-IP $remote_addr;\n"
-            config += "            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n"
-            config += "            proxy_set_header X-Forwarded-Proto $scheme;\n"
+            proxy_routes = ["/api", "/auth"]
+            for extra_route in normalize_route_list(svc.get("proxy_routes", "")):
+                if extra_route not in proxy_routes:
+                    proxy_routes.append(extra_route)
 
-            for header_name, header_value in GATEWAY_HEADERS.items():
-                config += "            proxy_set_header " + header_name + " \"" + str(header_value) + "\";\n"
-
-            config += "\n"
-            config += "            # CORS 支持\n"
-            config += "            add_header Access-Control-Allow-Origin *;\n"
-            config += "            add_header Access-Control-Allow-Methods 'GET, POST, PUT, DELETE, OPTIONS';\n"
-            config += "            add_header Access-Control-Allow-Headers 'DNT,X-CustomHeader,Keep-Alive,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Authorization';\n"
-            config += "\n"
-            config += "            if ($request_method = 'OPTIONS') {\n"
-            config += "                return 204;\n"
-            config += "            }\n"
-            config += "        }\n"
-
-            config += "\n"
-            config += "        # Auth 代理到网关\n"
-            config += "        location /auth/ {\n"
-            config += "            proxy_pass http://127.0.0.1:" + str(GATEWAY_PORT) + ";\n"
-            config += "            proxy_set_header Host $host;\n"
-            config += "            proxy_set_header X-Real-IP $remote_addr;\n"
-            config += "            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n"
-            config += "            proxy_set_header X-Forwarded-Proto $scheme;\n"
-
-            for header_name, header_value in GATEWAY_HEADERS.items():
-                config += "            proxy_set_header " + header_name + " \"" + str(header_value) + "\";\n"
-
-            config += "\n"
-            config += "            # CORS 支持\n"
-            config += "            add_header Access-Control-Allow-Origin *;\n"
-            config += "            add_header Access-Control-Allow-Methods 'GET, POST, PUT, DELETE, OPTIONS';\n"
-            config += "            add_header Access-Control-Allow-Headers 'DNT,X-CustomHeader,Keep-Alive,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Authorization';\n"
-            config += "\n"
-            config += "            if ($request_method = 'OPTIONS') {\n"
-            config += "                return 204;\n"
-            config += "            }\n"
-            config += "        }\n"
+            for proxy_route in proxy_routes:
+                config += "\n"
+                config = append_gateway_proxy_location(
+                    config,
+                    proxy_route,
+                    GATEWAY_PORT,
+                    GATEWAY_HEADERS,
+                    "代理到网关: " + proxy_route,
+                )
 
             config += "    }\n"
             config += "\n"
@@ -432,63 +470,27 @@ http {
 
     for name, svc in service_items(GO_SERVICES, GO_SERVICE_NAMES):
         if svc.get("enabled", True) and svc.get("route") and svc.get("port"):
-            routes = svc["route"]
             port = svc["port"]
-            route_list = routes.split(",") if "," in routes else [routes]
-            for route in route_list:
-                route = route.strip()
-                config += "        # " + name.upper() + " 服务路由\n"
-                config += "        location " + route + "/ {\n"
-                config += "            proxy_pass http://127.0.0.1:" + str(port) + ";\n"
-                config += "            proxy_set_header Host $host;\n"
-                config += "            proxy_set_header X-Real-IP $remote_addr;\n"
-                config += "            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n"
-                config += "            proxy_set_header X-Forwarded-Proto $scheme;\n"
-
-                for header_name, header_value in GATEWAY_HEADERS.items():
-                    config += "            proxy_set_header " + header_name + " \"" + str(header_value) + "\";\n"
-
-                config += "\n"
-                config += "            # CORS 支持\n"
-                config += "            add_header Access-Control-Allow-Origin *;\n"
-                config += "            add_header Access-Control-Allow-Methods 'GET, POST, PUT, DELETE, OPTIONS';\n"
-                config += "            add_header Access-Control-Allow-Headers 'DNT,X-CustomHeader,Keep-Alive,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Authorization';\n"
-                config += "\n"
-                config += "            if ($request_method = 'OPTIONS') {\n"
-                config += "                return 204;\n"
-                config += "            }\n"
-                config += "        }\n"
-                config += "\n"
+            for route in normalize_route_list(svc["route"]):
+                config = append_gateway_proxy_location(
+                    config,
+                    route,
+                    port,
+                    GATEWAY_HEADERS,
+                    name.upper() + " 服务路由",
+                )
 
     for name, svc in service_items(FRONTEND_SERVICES, FRONTEND_SERVICE_NAMES):
         if svc.get("enabled", True) and svc.get("route") and svc.get("port"):
-            routes = svc["route"]
             port = svc["port"]
-            route_list = routes.split(",") if "," in routes else [routes]
-            for route in route_list:
-                route = route.strip()
-                config += "        # " + name.upper() + " 前端服务路由\n"
-                config += "        location " + route + "/ {\n"
-                config += "            proxy_pass http://127.0.0.1:" + str(port) + ";\n"
-                config += "            proxy_set_header Host $host;\n"
-                config += "            proxy_set_header X-Real-IP $remote_addr;\n"
-                config += "            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n"
-                config += "            proxy_set_header X-Forwarded-Proto $scheme;\n"
-
-                for header_name, header_value in GATEWAY_HEADERS.items():
-                    config += "            proxy_set_header " + header_name + " \"" + str(header_value) + "\";\n"
-
-                config += "\n"
-                config += "            # CORS 支持\n"
-                config += "            add_header Access-Control-Allow-Origin *;\n"
-                config += "            add_header Access-Control-Allow-Methods 'GET, POST, PUT, DELETE, OPTIONS';\n"
-                config += "            add_header Access-Control-Allow-Headers 'DNT,X-CustomHeader,Keep-Alive,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Authorization';\n"
-                config += "\n"
-                config += "            if ($request_method = 'OPTIONS') {\n"
-                config += "                return 204;\n"
-                config += "            }\n"
-                config += "        }\n"
-                config += "\n"
+            for route in normalize_route_list(svc["route"]):
+                config = append_gateway_proxy_location(
+                    config,
+                    route,
+                    port,
+                    GATEWAY_HEADERS,
+                    name.upper() + " 前端服务路由",
+                )
 
     config += """    }
 }

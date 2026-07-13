@@ -93,9 +93,11 @@ brew install tilt jq nginx
 |---|---|---|---|
 | `path` | string | 是 | 前端项目目录 |
 | `port` | number | 是 | 前端服务端口 |
+| `dev_mode` | boolean | 否 | 是否强制走前端开发模式；`true` 用 `start_command`，`false` 且配置了 `static_path` 时走 dist |
 | `start_command` | string | 否 | 启动命令，默认 `npm run serve` |
 | `node_version` | string | 否 | Node 版本（通过 nvm 切换） |
 | `static_path` | string | 否 | dist静态资源目录，启用则不使用start_command启动 |
+| `proxy_routes` | string | 否 | 仅静态模式生效，额外转发到网关的路径前缀，支持逗号分隔多个 |
 | `route` | string | 否 | 网关路径，支持逗号分隔多个 |
 | `domain` | string | 否 | 支持主机名或 `http/https` URL，支持逗号分隔多个 |
 | `enabled` | boolean | 是 | 是否启用 |
@@ -123,7 +125,9 @@ brew install tilt jq nginx
     "web-hello": {
       "path": "./web-hello",
       "port": 18080,
+      "dev_mode": false,
       "static_path": "./dist",
+      "proxy_routes": "/shared",
       "route": "/demo",
       "enabled": true
     }
@@ -174,6 +178,7 @@ brew install tilt jq nginx
     "admin-web": {
       "path": "./frontends/admin-web",
       "port": 18080,
+      "dev_mode": true,
       "start_command": "pnpm dev",
       "node_version": "20",
       "route": "/admin,/dashboard",
@@ -183,7 +188,9 @@ brew install tilt jq nginx
     "portal-static": {
       "path": "./frontends/portal",
       "port": 18084,
+      "dev_mode": false,
       "static_path": "./dist",
+      "proxy_routes": "/shared,/v2",
       "route": "/portal",
       "domain": "portal.local.dev",
       "enabled": true
@@ -191,6 +198,13 @@ brew install tilt jq nginx
   }
 }
 ```
+
+说明：
+- `dev_mode: true` 时总是按前端开发服务器启动，即使保留了 `static_path` 也不会走 dist。
+- `dev_mode: false` 时，如果配置了 `static_path` 就走 dist 静态托管；没配置 `static_path` 时仍然走 `start_command`。
+- 静态模式下默认只会把 `/api`、`/auth` 转发到内置网关，其余路径会按 SPA 静态资源处理。
+- 如果 dist 页面还需要像 `http://localhost:8082/shared` 这种路径代理，可在对应前端服务上增加 `proxy_routes`，例如 `"/shared,/v2"`。
+- `proxy_routes` 会同时匹配 `/shared` 和 `/shared/...`，再由网关按后端服务的 `route` 继续转发。
 
 ## 域名模式（可选）
 

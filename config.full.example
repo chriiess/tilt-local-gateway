@@ -38,6 +38,7 @@
     "admin-web": {
       "path": "./frontends/admin-web",
       "port": 18080,
+      "dev_mode": true,
       "start_command": "pnpm dev",
       "node_version": "20",
       "route": "/admin,/dashboard",
@@ -47,7 +48,9 @@
     "portal-static": {
       "path": "./frontends/portal",
       "port": 18084,
+      "dev_mode": false,
       "static_path": "./dist",
+      "proxy_routes": "/shared,/v2",
       "route": "/portal",
       "domain": "portal.local.dev",
       "enabled": true

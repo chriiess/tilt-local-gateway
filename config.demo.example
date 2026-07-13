@@ -18,7 +18,9 @@
     "web-hello": {
       "path": "./web-hello",
       "port": 18080,
+      "dev_mode": false,
       "static_path": "./dist",
+      "proxy_routes": "/shared",
       "route": "/demo",
       "enabled": true
     }
