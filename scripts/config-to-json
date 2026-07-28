@@ -1,0 +1,32 @@
+#!/bin/bash
+# 使用 macOS 自带 Ruby 的 YAML 标准库将配置转换为 JSON，供 jq 使用。
+
+set -e
+
+CONFIG_FILE="${1:-}"
+
+if [ -z "$CONFIG_FILE" ]; then
+    echo "用法: config-to-json <config.yaml>" >&2
+    exit 2
+fi
+
+if [ ! -f "$CONFIG_FILE" ]; then
+    echo "配置文件不存在: $CONFIG_FILE" >&2
+    exit 1
+fi
+
+if ! command -v ruby >/dev/null 2>&1; then
+    echo "缺少 ruby，无法解析 YAML 配置（macOS 默认已内置）" >&2
+    exit 1
+fi
+
+ruby -ryaml -rjson -e '
+begin
+  value = YAML.safe_load(File.read(ARGV[0]), permitted_classes: [], permitted_symbols: [], aliases: false)
+  raise "配置文件必须是一个 YAML mapping/object" unless value.is_a?(Hash)
+  puts JSON.generate(value)
+rescue StandardError => e
+  warn "YAML 解析失败: #{e.message}"
+  exit 1
+end
+' "$CONFIG_FILE"

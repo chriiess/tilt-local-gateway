@@ -15,7 +15,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # 配置文件路径
-CONFIG_FILE="$PROJECT_ROOT/config.json"
+CONFIG_FILE="${1:-$PROJECT_ROOT/config.yaml}"
+CONFIG_TO_JSON="$PROJECT_ROOT/scripts/config-to-json"
 HOSTS_FILE="/etc/hosts"
 
 # 检查依赖
@@ -31,13 +32,13 @@ if [ ! -f "$CONFIG_FILE" ]; then
 fi
 
 # 读取配置文件，提取并标准化所有域名（支持逗号分隔、支持 http/https 前缀）
-DOMAINS=$(jq -r '
+DOMAINS=$("$CONFIG_TO_JSON" "$CONFIG_FILE" | jq -r '
   [
     (.go_services // {} | to_entries[]? | .value.domain // empty),
     (.frontend_services // {} | to_entries[]? | .value.domain // empty)
   ]
   | .[]
-' "$CONFIG_FILE" \
+' \
     | tr ',' '\n' \
     | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
     | sed 's#^http://##' \
@@ -57,7 +58,7 @@ if [ "$EUID" -ne 0 ]; then
     echo ""
     echo -e "${YELLOW}需要 sudo 权限来修改 /etc/hosts${NC}"
     echo "请输入密码以继续："
-    exec sudo bash "$0" "$@"
+    exec sudo bash "$0" "$CONFIG_FILE"
 fi
 
 # 显示标题（在获取 sudo 权限后）

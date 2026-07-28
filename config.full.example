@@ -1,59 +1,58 @@
-{
-  "code_root": "__CODE_ROOT__",
-  "gateway": {
-    "port": 17001,
-    "headers": {
-      "x-env": "local",
-      "x-debug": "true"
-    }
-  },
-  "go_services": {
-    "user-api": {
-      "path": "./services/user-api",
-      "port": 18081,
-      "route": "/api/user,/api/profile",
-      "domain": "user.local.dev,https://user.local.test",
-      "config": "./configs/dev.yaml",
-      "config_arg": "-config=",
-      "enabled": true
-    },
-    "order-api": {
-      "path": "./services/order-api",
-      "port": 18082,
-      "route": "/api/order",
-      "config": "./conf/local.toml",
-      "config_arg": "--gf.gcfg.file=",
-      "enabled": true
-    },
-    "legacy-api": {
-      "path": "./services/legacy-api",
-      "port": 18083,
-      "route": "/api/legacy",
-      "config": "./config/dev.yaml",
-      "config_arg": null,
-      "enabled": false
-    }
-  },
-  "frontend_services": {
-    "admin-web": {
-      "path": "./frontends/admin-web",
-      "port": 18080,
-      "dev_mode": true,
-      "start_command": "pnpm dev",
-      "node_version": "20",
-      "route": "/admin,/dashboard",
-      "domain": "admin.local.dev,http://admin.local.test",
-      "enabled": true
-    },
-    "portal-static": {
-      "path": "./frontends/portal",
-      "port": 18084,
-      "dev_mode": false,
-      "static_path": "./dist",
-      "proxy_routes": "/shared,/v2",
-      "route": "/portal",
-      "domain": "portal.local.dev",
-      "enabled": true
-    }
-  }
-}
+# 所有 path 均相对于 code_root，也可以填写绝对路径。
+code_root: __CODE_ROOT__
+
+gateway:
+  port: 17001
+  headers:
+    x-env: local
+    # YAML 会把 true 解析为布尔值；Header 需要字符串时请加引号。
+    x-debug: "true"
+
+go_services:
+  user-api:
+    path: ./services/user-api
+    port: 18081
+    route: /api/user,/api/profile
+    domain: user.local.dev,https://user.local.test
+    config: ./configs/dev.yaml
+    config_arg: -config=
+    enabled: true
+
+  order-api:
+    path: ./services/order-api
+    port: 18082
+    route: /api/order
+    config: ./conf/local.toml
+    config_arg: --gf.gcfg.file=
+    enabled: true
+
+  legacy-api:
+    path: ./services/legacy-api
+    port: 18083
+    route: /api/legacy
+    config: ./config/dev.yaml
+    # null 表示启动命令不传配置参数。
+    config_arg: null
+    enabled: false
+
+frontend_services:
+  admin-web:
+    path: ./frontends/admin-web
+    port: 18080
+    dev_mode: true
+    start_command: pnpm dev
+    # 版本号建议加引号，避免被 YAML 当成数字。
+    node_version: "20"
+    route: /admin,/dashboard
+    domain: admin.local.dev,http://admin.local.test
+    enabled: true
+
+  portal-static:
+    path: ./frontends/portal
+    port: 18084
+    dev_mode: false
+    static_path: ./dist
+    proxy_routes: /shared,/v2
+    route: /portal
+    domain: portal.local.dev
+    enabled: true

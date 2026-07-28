@@ -22,7 +22,7 @@ brew install tilt jq nginx
 
 ## 内置 Demo（两个最小项目）
 
-`./devmesh init` 会自动生成可直接运行的 `config.json`，默认使用内置 demo：
+`./devmesh init` 会自动生成可直接运行、支持 `#` 注释的 `config.yaml`，默认使用内置 demo：
 
 - `demo/projects/go-hello`：Go API 服务（`/api/hello/*`）
 - `demo/projects/web-hello`：静态前端页面（按钮调用后端 API）
@@ -46,7 +46,7 @@ brew install tilt jq nginx
 ## 常用命令
 
 ```bash
-./devmesh init                # 生成本地 config.json（demo 可运行）
+./devmesh init                # 生成本地 config.yaml（demo 可运行）
 ./devmesh init --full         # 生成完整版配置模板（需按项目实际修改）
 ./devmesh validate            # 校验配置和环境依赖
 ./devmesh up [services]       # 启动所有/指定服务
@@ -58,12 +58,12 @@ brew install tilt jq nginx
 ./devmesh cleanup             # 安全清理（仅清理本工具启动的进程）
 ./devmesh setup-nginx         # 可选：手动配置 Nginx 80 端口权限
 ./devmesh setup-hosts         # 可选：手动配置本地域名映射
-./devmesh up -c=./config.json # 指定配置文件
+./devmesh up -c=./config.yaml # 指定配置文件
 ```
 
 ## 配置说明
 
-主配置文件为 `config.json`，模板为 `config.demo.example`。
+主配置文件为 `config.yaml`，模板为 `config.demo.example`。YAML 解析使用 macOS 自带 Ruby 标准库，无需安装 `yq` 或额外语言包；通过 `-c` 指定旧 JSON 配置仍然兼容。
 
 ### 顶层字段
 
@@ -104,99 +104,70 @@ brew install tilt jq nginx
 
 ### Demo 默认配置示例
 
-```json
-{
-  "code_root": "__CODE_ROOT__",
-  "gateway": {
-    "port": 17001,
-    "headers": {
-      "x-demo-user": "tilt-demo"
-    }
-  },
-  "go_services": {
-    "go-hello": {
-      "path": "./go-hello",
-      "port": 18081,
-      "route": "/api/hello",
-      "enabled": true
-    }
-  },
-  "frontend_services": {
-    "web-hello": {
-      "path": "./web-hello",
-      "port": 18080,
-      "dev_mode": false,
-      "static_path": "./dist",
-      "proxy_routes": "/shared",
-      "route": "/demo",
-      "enabled": true
-    }
-  }
-}
+```yaml
+# 可以直接添加注释
+code_root: __CODE_ROOT__
+
+gateway:
+  port: 17001
+  headers:
+    x-demo-user: tilt-demo
+
+go_services:
+  go-hello:
+    path: ./go-hello
+    port: 18081
+    route: /api/hello
+    enabled: true
+
+frontend_services:
+  web-hello:
+    path: ./web-hello
+    port: 18080
+    dev_mode: false
+    static_path: ./dist
+    proxy_routes: /shared
+    route: /demo
+    enabled: true
 ```
 
 ### 完整配置示范
 
-```json
-{
-  "code_root": "/Users/you/workspace",
-  "gateway": {
-    "port": 17001,
-    "headers": {
-      "x-env": "local",
-      "x-debug": "true"
-    }
-  },
-  "go_services": {
-    "user-api": {
-      "path": "./services/user-api",
-      "port": 18081,
-      "route": "/api/user,/api/profile",
-      "domain": "user.local.dev,https://user.local.test",
-      "config": "./configs/dev.yaml",
-      "config_arg": "-config=",
-      "enabled": true
-    },
-    "order-api": {
-      "path": "/Users/you/workspace/services/order-api",
-      "port": 18082,
-      "route": "/api/order",
-      "config": "./conf/local.toml",
-      "config_arg": "--gf.gcfg.file=",
-      "enabled": true
-    },
-    "legacy-api": {
-      "path": "./services/legacy-api",
-      "port": 18083,
-      "route": "/api/legacy",
-      "config": "./config/dev.yaml",
-      "config_arg": null,
-      "enabled": false
-    }
-  },
-  "frontend_services": {
-    "admin-web": {
-      "path": "./frontends/admin-web",
-      "port": 18080,
-      "dev_mode": true,
-      "start_command": "pnpm dev",
-      "node_version": "20",
-      "route": "/admin,/dashboard",
-      "domain": "admin.local.dev,http://admin.local.test",
-      "enabled": true
-    },
-    "portal-static": {
-      "path": "./frontends/portal",
-      "port": 18084,
-      "dev_mode": false,
-      "static_path": "./dist",
-      "proxy_routes": "/shared,/v2",
-      "route": "/portal",
-      "domain": "portal.local.dev",
-      "enabled": true
-    }
-  }
-}
+```yaml
+code_root: /Users/you/workspace
+
+gateway:
+  port: 17001
+  headers:
+    x-env: local
+    x-debug: "true" # 字符串建议显式加引号
+
+go_services:
+  user-api:
+    path: ./services/user-api
+    port: 18081
+    route: /api/user,/api/profile
+    domain: user.local.dev,https://user.local.test
+    config: ./configs/dev.yaml
+    config_arg: -config=
+    enabled: true
+
+  legacy-api:
+    path: ./services/legacy-api
+    port: 18083
+    route: /api/legacy
+    config_arg: null
+    enabled: false
+
+frontend_services:
+  admin-web:
+    path: ./frontends/admin-web
+    port: 18080
+    dev_mode: true
+    start_command: pnpm dev
+    node_version: "20"
+    route: /admin,/dashboard
+    enabled: true
 ```
 
 说明：
@@ -241,7 +212,7 @@ brew install tilt jq nginx
 
 ## 常见问题
 
-- `config.json 中未配置 code_root`：请填写绝对路径，不要使用 `~`。
+- `配置文件中未配置 code_root`：请填写绝对路径，不要使用 `~`。
 - `端口冲突`：运行 `./devmesh ports` 定位占用进程。
 - `配置了 domain 但不生效`：重新执行 `./devmesh up`，按提示授权自动执行 `setup-nginx` 与 `setup-hosts`。
 

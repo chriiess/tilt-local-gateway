@@ -1,5 +1,5 @@
 .DS_Store
 demo/projects/Tiltfile
-config.json
-config_*.json
+config.yaml
+config_*.yaml
 nginx.conf

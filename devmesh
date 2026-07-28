@@ -10,9 +10,10 @@ set -e
 
 # 获取脚本所在目录
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONFIG_FILE="$SCRIPT_DIR/config.json"
+CONFIG_FILE="$SCRIPT_DIR/config.yaml"
 CONFIG_DEMO_EXAMPLE_FILE="$SCRIPT_DIR/config.demo.example"
 CONFIG_FULL_EXAMPLE_FILE="$SCRIPT_DIR/config.full.example"
+CONFIG_TO_JSON="$SCRIPT_DIR/scripts/config-to-json"
 
 # 颜色输出
 RED=$'\033[0;31m'
@@ -28,16 +29,24 @@ CLEANUP_QUIET=false
 
 load_code_root() {
     if [ ! -f "$CONFIG_FILE" ]; then
-        echo -e "${RED}错误: 未找到 config.json 文件 ($CONFIG_FILE)${NC}"
+        echo -e "${RED}错误: 未找到配置文件 ($CONFIG_FILE)${NC}"
         echo -e "请先运行: ${YELLOW}$0 init${NC}"
         exit 1
     fi
 
-    CODE_ROOT=$(jq -r '.code_root // empty' "$CONFIG_FILE" 2>/dev/null)
+    CODE_ROOT=$(config_jq -r '.code_root // empty' 2>/dev/null)
     if [ -z "$CODE_ROOT" ]; then
-        echo -e "${RED}错误: config.json 中未配置 code_root${NC}"
+        echo -e "${RED}错误: 配置文件中未配置 code_root${NC}"
         exit 1
     fi
+}
+
+config_to_json() {
+    "$CONFIG_TO_JSON" "$CONFIG_FILE"
+}
+
+config_jq() {
+    config_to_json | jq "$@"
 }
 
 ensure_code_root_tiltfile() {
@@ -69,7 +78,7 @@ run_tilt() {
     TILT_CONFIG_FILE="$CONFIG_FILE" tilt "$@"
 }
 
-# 从 config.json 读取所有端口
+# 从配置文件读取所有端口
 get_all_ports() {
     if [ ! -f "$CONFIG_FILE" ]; then
         echo ""
@@ -80,14 +89,14 @@ get_all_ports() {
 
     # 网关端口
     local gateway_port
-    gateway_port=$(jq -r '.gateway.port // empty' "$CONFIG_FILE" 2>/dev/null)
+    gateway_port=$(config_jq -r '.gateway.port // empty' 2>/dev/null)
     if [ -n "$gateway_port" ]; then
         ports+=("$gateway_port")
     fi
 
     # Go 服务端口
     local go_ports
-    go_ports=$(jq -r '.go_services // {} | to_entries[] | select(.value.enabled == true) | .value.port' "$CONFIG_FILE" 2>/dev/null)
+    go_ports=$(config_jq -r '.go_services // {} | to_entries[] | select(.value.enabled == true) | .value.port' 2>/dev/null)
     if [ -n "$go_ports" ]; then
         while IFS= read -r port; do
             [ -n "$port" ] && ports+=("$port")
@@ -96,7 +105,7 @@ get_all_ports() {
 
     # 前端服务端口
     local frontend_ports
-    frontend_ports=$(jq -r '.frontend_services // {} | to_entries[] | select(.value.enabled == true) | .value.port' "$CONFIG_FILE" 2>/dev/null)
+    frontend_ports=$(config_jq -r '.frontend_services // {} | to_entries[] | select(.value.enabled == true) | .value.port' 2>/dev/null)
     if [ -n "$frontend_ports" ]; then
         while IFS= read -r port; do
             [ -n "$port" ] && ports+=("$port")
@@ -115,7 +124,7 @@ ${YELLOW}用法:${NC}
     $0 [-c <config_file>] <command> [options]
 
 ${YELLOW}全局选项:${NC}
-    ${GREEN}-c, --config${NC}      指定配置文件路径（默认: $SCRIPT_DIR/config.json）
+    ${GREEN}-c, --config${NC}      指定配置文件路径（默认: $SCRIPT_DIR/config.yaml）
 
 ${YELLOW}命令:${NC}
     ${GREEN}init [--full]${NC}      生成配置文件（默认 Demo，可选完整版模板）
@@ -135,8 +144,8 @@ ${YELLOW}命令:${NC}
 ${YELLOW}示例:${NC}
     $0 init                  # 生成可直接运行的 Demo 配置
     $0 init --full           # 生成完整版配置模板（需按项目实际路径调整）
-    $0 -c=./config.json up  # 使用指定配置文件启动
-    $0 up -c=./config.json  # 子命令后指定配置文件也生效
+    $0 -c=./config.yaml up  # 使用指定配置文件启动
+    $0 up -c=./config.yaml  # 子命令后指定配置文件也生效
     $0 validate              # 校验配置和依赖
     $0 up                    # 启动所有服务
     $0 up user-service       # 只启动 user-service 服务
@@ -158,6 +167,7 @@ cmd_init() {
     local init_mode="${1:-demo}"
     local template_file="$CONFIG_DEMO_EXAMPLE_FILE"
     local code_root_value=""
+    local legacy_config_file="$SCRIPT_DIR/config.json"
 
     case "$init_mode" in
         demo|"")
@@ -176,7 +186,7 @@ cmd_init() {
     esac
 
     if [ -f "$CONFIG_FILE" ]; then
-        echo -e "${YELLOW}config.json 已存在: $CONFIG_FILE${NC}"
+        echo -e "${YELLOW}配置文件已存在: $CONFIG_FILE${NC}"
         echo "如需重置，请先手动备份并删除后重试。"
         return
     fi
@@ -188,7 +198,7 @@ cmd_init() {
 
     sed "s|__CODE_ROOT__|$code_root_value|g" "$template_file" > "$CONFIG_FILE"
 
-    echo -e "${GREEN}✓ 已生成 config.json${NC}"
+    echo -e "${GREEN}✓ 已生成 config.yaml${NC}"
     if [ "$init_mode" = "--full" ] || [ "$init_mode" = "full" ]; then
         echo "已写入完整版配置模板："
         echo "  - 来源: config.full.example"
@@ -266,13 +276,13 @@ check_route_line() {
 }
 
 get_enabled_domains() {
-    jq -r '
+    config_jq -r '
       [
         (.go_services // {} | to_entries[] | select(.value.enabled == true and .value.domain != null) | .value.domain),
         (.frontend_services // {} | to_entries[] | select(.value.enabled == true and .value.domain != null) | .value.domain)
       ]
       | .[]
-    ' "$CONFIG_FILE" \
+    ' \
         | tr ',' '\n' \
         | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
         | sed 's#^http://##' \
@@ -326,7 +336,7 @@ confirm_and_prepare_domain_prerequisites() {
                 "$SCRIPT_DIR/scripts/setup-nginx.sh"
             fi
             if [ "$needs_hosts_setup" -eq 1 ]; then
-                "$SCRIPT_DIR/scripts/setup-hosts.sh"
+                "$SCRIPT_DIR/scripts/setup-hosts.sh" "$CONFIG_FILE"
             fi
             ;;
         *)
@@ -357,13 +367,13 @@ validate_config() {
         exit 1
     fi
 
-    if ! jq . "$CONFIG_FILE" >/dev/null 2>&1; then
-        echo -e "${RED}✗${NC} config.json 不是合法 JSON"
+    if ! config_to_json >/dev/null; then
+        echo -e "${RED}✗${NC} 配置文件不是合法 YAML"
         exit 1
     fi
 
     local code_root
-    code_root=$(jq -r '.code_root // empty' "$CONFIG_FILE")
+    code_root=$(config_jq -r '.code_root // empty')
     if [ -z "$code_root" ]; then
         echo -e "${RED}✗${NC} code_root 未配置"
         has_error=1
@@ -376,8 +386,8 @@ validate_config() {
 
     # 至少启用一个服务
     local enabled_go enabled_frontend total_enabled
-    enabled_go=$(jq '[.go_services // {} | to_entries[] | select(.value.enabled == true)] | length' "$CONFIG_FILE")
-    enabled_frontend=$(jq '[.frontend_services // {} | to_entries[] | select(.value.enabled == true)] | length' "$CONFIG_FILE")
+    enabled_go=$(config_jq '[.go_services // {} | to_entries[] | select(.value.enabled == true)] | length')
+    enabled_frontend=$(config_jq '[.frontend_services // {} | to_entries[] | select(.value.enabled == true)] | length')
     total_enabled=$((enabled_go + enabled_frontend))
     if [ "$total_enabled" -eq 0 ]; then
         echo -e "${RED}✗${NC} 没有任何 enabled=true 的服务"
@@ -403,18 +413,18 @@ validate_config() {
             echo -e "${RED}✗${NC} ${svc_type} 服务 ${YELLOW}$svc_name${NC} 路径不存在: $full_path"
             has_error=1
         fi
-    done < <(jq -r '
+    done < <(config_jq -r '
       [
         (.go_services // {} | to_entries[] | select(.value.enabled == true) | ["Go", .key, (.value.path // "")]),
         (.frontend_services // {} | to_entries[] | select(.value.enabled == true) | ["Frontend", .key, (.value.path // "")])
       ]
       | .[]
       | @tsv
-    ' "$CONFIG_FILE" | awk -F'\t' '{print $1"|"$2"|"$3}')
+    ' | awk -F'\t' '{print $1"|"$2"|"$3}')
 
     # 端口冲突校验
     local duplicates
-    duplicates=$(jq -r '
+    duplicates=$(config_jq -r '
       [
         (.gateway.port // empty),
         (.go_services // {} | to_entries[] | select(.value.enabled == true) | .value.port),
@@ -424,7 +434,7 @@ validate_config() {
       | map(select(. != null and . != ""))
       | map(tostring)
       | .[]
-    ' "$CONFIG_FILE" | sort | uniq -d)
+    ' | sort | uniq -d)
 
     if [ -n "$duplicates" ]; then
       echo -e "${RED}✗${NC} 检测到端口重复:"
@@ -440,26 +450,26 @@ validate_config() {
     while IFS='|' read -r svc_name domains; do
         [ -z "$svc_name" ] && continue
         check_domain_line "$svc_name" "$domains" || has_error=1
-    done < <(jq -r '
+    done < <(config_jq -r '
       [
         (.go_services // {} | to_entries[] | select(.value.enabled == true and .value.domain != null) | [.key, .value.domain]),
         (.frontend_services // {} | to_entries[] | select(.value.enabled == true and .value.domain != null) | [.key, .value.domain])
       ]
       | .[]
       | @tsv
-    ' "$CONFIG_FILE" | awk -F'\t' '{print $1"|"$2}')
+    ' | awk -F'\t' '{print $1"|"$2}')
 
     while IFS='|' read -r svc_name routes; do
         [ -z "$svc_name" ] && continue
         check_route_line "$svc_name" "$routes" || has_error=1
-    done < <(jq -r '
+    done < <(config_jq -r '
       [
         (.go_services // {} | to_entries[] | select(.value.enabled == true and .value.route != null) | [.key, .value.route]),
         (.frontend_services // {} | to_entries[] | select(.value.enabled == true and .value.route != null) | [.key, .value.route])
       ]
       | .[]
       | @tsv
-    ' "$CONFIG_FILE" | awk -F'\t' '{print $1"|"$2}')
+    ' | awk -F'\t' '{print $1"|"$2}')
 
     if [ "$has_error" -eq 0 ]; then
         echo -e "${GREEN}✅ 校验通过${NC}"
@@ -507,7 +517,7 @@ cleanup() {
     fi
 
     if [ -z "$CODE_ROOT" ] && [ -f "$CONFIG_FILE" ]; then
-        CODE_ROOT=$(jq -r '.code_root // empty' "$CONFIG_FILE" 2>/dev/null || true)
+        CODE_ROOT=$(config_jq -r '.code_root // empty' 2>/dev/null || true)
     fi
 
     # 1. 停止当前 code_root 对应的 Tilt 会话
@@ -591,7 +601,7 @@ cmd_ui() {
 # 检查端口占用
 cmd_ports() {
     if [ ! -f "$CONFIG_FILE" ]; then
-        echo -e "${RED}错误: 未找到 config.json 文件 ($CONFIG_FILE)${NC}"
+        echo -e "${RED}错误: 未找到配置文件 ($CONFIG_FILE)${NC}"
         exit 1
     fi
 
@@ -654,7 +664,7 @@ cmd_ports() {
 
 
 cmd_setup_hosts() {
-    "$SCRIPT_DIR/scripts/setup-hosts.sh"
+    "$SCRIPT_DIR/scripts/setup-hosts.sh" "$CONFIG_FILE"
 }
 
 cmd_setup_nginx() {

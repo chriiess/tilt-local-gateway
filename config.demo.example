@@ -1,28 +1,24 @@
-{
-  "code_root": "__CODE_ROOT__",
-  "gateway": {
-    "port": 17001,
-    "headers": {
-      "x-demo-user": "tilt-demo"
-    }
-  },
-  "go_services": {
-    "go-hello": {
-      "path": "./go-hello",
-      "port": 18081,
-      "route": "/api/hello",
-      "enabled": true
-    }
-  },
-  "frontend_services": {
-    "web-hello": {
-      "path": "./web-hello",
-      "port": 18080,
-      "dev_mode": false,
-      "static_path": "./dist",
-      "proxy_routes": "/shared",
-      "route": "/demo",
-      "enabled": true
-    }
-  }
-}
+# 代码根目录；init 时会自动替换此占位符。
+code_root: __CODE_ROOT__
+
+gateway:
+  port: 17001
+  headers:
+    x-demo-user: tilt-demo
+
+go_services:
+  go-hello:
+    path: ./go-hello
+    port: 18081
+    route: /api/hello
+    enabled: true
+
+frontend_services:
+  web-hello:
+    path: ./web-hello
+    port: 18080
+    dev_mode: false
+    static_path: ./dist
+    proxy_routes: /shared
+    route: /demo
+    enabled: true
